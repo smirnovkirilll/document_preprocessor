@@ -639,7 +639,7 @@ def run_from_cli() -> None:
         description="Препроцессинг фото документа для OCR (PIL + OpenCV)"
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
         "--input-file",
         help="одиночный входной файл (фото документа)",
@@ -651,7 +651,7 @@ def run_from_cli() -> None:
 
     parser.add_argument(
         "--output-file",
-        help="выходной файл для одиночного режима (обязателен с --input-file)",
+        help="выходной файл для одиночного режима (может браться из DOC_PREPROC_OUTPUT_FILE)",
     )
     parser.add_argument(
         "--output-dir",
@@ -660,7 +660,7 @@ def run_from_cli() -> None:
     )
     parser.add_argument(
         "--suffix",
-        default="_ocr",
+        default=None,  # будем задавать по умолчанию "_ocr" после учёта окружения
         help="суффикс для имён файлов при пакетной обработке без output-dir (по умолчанию _ocr)",
     )
     parser.add_argument(
@@ -694,7 +694,7 @@ def run_from_cli() -> None:
     parser.add_argument(
         "--profile",
         choices=["default", "dark", "shadows", "small_text"],
-        default="default",
+        default=None,  # профиль может прийти из окружения DOC_PREPROC_PROFILE
         help="готовый набор настроек (default, dark, shadows, small_text)",
     )
 
@@ -784,14 +784,95 @@ def run_from_cli() -> None:
 
     args = parser.parse_args()
 
+    # --------- чтение простых булевых флагов из окружения ---------
+
+    def env_bool(name: str) -> Optional[bool]:
+        val = os.getenv(name)
+        if val is None:
+            return None
+        return val.strip().lower() in ("1", "true", "yes", "y", "on")
+
+    env_debug = env_bool("DOC_PREPROC_DEBUG")
+    if env_debug is not None and not args.debug:
+        args.debug = env_debug
+
+    env_verbose = env_bool("DOC_PREPROC_VERBOSE")
+    if env_verbose is not None and not args.verbose:
+        args.verbose = env_verbose
+
+    env_recursive = env_bool("DOC_PREPROC_RECURSIVE")
+    if env_recursive is not None and not args.recursive:
+        args.recursive = env_recursive
+
+    env_skip_existing = env_bool("DOC_PREPROC_SKIP_EXISTING")
+    if env_skip_existing is not None and not args.skip_existing:
+        args.skip_existing = env_skip_existing
+
     # Логирование
     logging.basicConfig(
         level=logging.DEBUG if args.verbose or args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
 
+    # --------- ввод / вывод из окружения ---------
+
+    # input-file / input-dir
+    if not args.input_file and not args.input_dir:
+        env_input_file = os.getenv("DOC_PREPROC_INPUT_FILE")
+        env_input_dir = os.getenv("DOC_PREPROC_INPUT_DIR")
+
+        if env_input_file and env_input_dir:
+            parser.error(
+                "Both DOC_PREPROC_INPUT_FILE and DOC_PREPROC_INPUT_DIR are set; use only one."
+            )
+        elif env_input_file:
+            args.input_file = env_input_file
+        elif env_input_dir:
+            args.input_dir = env_input_dir
+        else:
+            parser.error(
+                "Either --input-file/--input-dir or DOC_PREPROC_INPUT_FILE/DOC_PREPROC_INPUT_DIR must be set."
+            )
+
+    # output-file для одиночного режима
+    if args.input_file and not args.output_file:
+        env_output_file = os.getenv("DOC_PREPROC_OUTPUT_FILE")
+        if env_output_file:
+            args.output_file = env_output_file
+
+    # output-dir для пакетного режима
+    if args.input_dir and not args.output_dir:
+        env_output_dir = os.getenv("DOC_PREPROC_OUTPUT_DIR")
+        if env_output_dir:
+            args.output_dir = env_output_dir
+
+    # suffix
+    if args.suffix is None:
+        env_suffix = os.getenv("DOC_PREPROC_SUFFIX")
+        args.suffix = env_suffix if env_suffix else "_ocr"
+
+    # include
+    if args.include is None:
+        env_include = os.getenv("DOC_PREPROC_INCLUDE")
+        if env_include:
+            parts = []
+            for token in env_include.replace(",", " ").split():
+                token = token.strip()
+                if token:
+                    parts.append(token)
+            args.include = parts if parts else None
+
+    # profile (CLI > ENV > default)
+    env_profile = os.getenv("DOC_PREPROC_PROFILE")
+    if args.profile is not None:
+        profile_name = args.profile
+    elif env_profile:
+        profile_name = env_profile
+    else:
+        profile_name = "default"
+
     # 1) базовый профиль + 2) переменные окружения
-    cfg = PreprocessorConfig.from_profile_and_env(profile=args.profile)
+    cfg = PreprocessorConfig.from_profile_and_env(profile=profile_name)
 
     # 3) переопределения из CLI (самый высокий приоритет)
     if args.long_side is not None:
@@ -831,7 +912,10 @@ def run_from_cli() -> None:
     try:
         if args.input_file:
             if not args.output_file:
-                parser.error("--output-file обязательно при использовании --input-file")
+                parser.error(
+                    "--output-file обязательно при использовании --input-file "
+                    "или задайте DOC_PREPROC_OUTPUT_FILE"
+                )
             pre.preprocess_file(args.input_file, args.output_file)
         else:
             if args.include:
