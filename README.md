@@ -1,4 +1,5 @@
-> [!CAUTION] AI-created/vibe coded
+> [!CAUTION]
+> AI-created/vibe coded
 >
 > AI-model: ChatGPT 5.1
 >
@@ -139,7 +140,6 @@ Profiles are predefined configurations for common scenarios. You can select them
 ### `default`
 
 General‑purpose settings for typical office documents:
-
 - global Otsu binarization,
 - moderate contrast enhancement,
 - moderate noise reduction,
@@ -148,7 +148,6 @@ General‑purpose settings for typical office documents:
 ### `dark`
 
 For underexposed or very dark photos:
-
 - stronger contrast,
 - **adaptive** binarization with a larger block size,
 - light opening + closing to regularize text.
@@ -156,7 +155,6 @@ For underexposed or very dark photos:
 ### `shadows`
 
 For documents with strong local shadows/uneven lighting:
-
 - adaptive binarization with a somewhat smaller window (handles local variations),
 - moderate contrast,
 - light morphology.
@@ -164,11 +162,24 @@ For documents with strong local shadows/uneven lighting:
 ### `small_text`
 
 For very small text (e.g. distant page photos):
-
 - higher target resolution (larger `target_long_side_px`),
 - gentle smoothing (or almost none),
 - slightly stronger, but controlled, sharpening,
 - minimal morphology to avoid eating thin strokes.
+
+### `small_text_hard`
+
+For very small text, strong shadows, and low‑resolution source images (e.g. distant photos, old phone cameras):
+- keeps smoothing almost disabled to avoid blurring thin strokes;
+- uses stronger contrast and more aggressive sharpening to make tiny glyphs stand out;
+- uses adaptive binarization with a smaller window to react to local shadows and illumination changes;
+- applies only light closing (no opening) to avoid erasing fine details while still fixing small gaps inside letters.
+
+Use this when:
+- text is barely legible on the original image,
+- there are pronounced shadows or uneven lighting,
+- upscaling the image doesn’t really add detail (original is already low‑res).
+
 
 You can still override any parameter in a profile via environment variables or CLI.
 
@@ -220,6 +231,8 @@ DOC_PREPROC_DPI
 ```
 
 Invalid values are ignored with a warning.
+
+---
 
 ## CLI usage
 
@@ -356,6 +369,7 @@ pre.save_for_ocr(img, output_path)
 
 You can replace `binarize_otsu` with `binarize_adaptive` depending on your needs.
 
+---
 
 ## How it compares to typical GitHub scripts
 
