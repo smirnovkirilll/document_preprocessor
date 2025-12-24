@@ -1,0 +1,27 @@
+[build-system]
+requires = [
+    "numpy",
+    "Pillow",
+    "opencv-python",
+]
+build-backend = "hatchling.build"
+
+[project]
+name = "document_preprocessor"
+version = "2025.12.24"
+authors = [
+  { name="Kirill Smirnov", gighub="https://github.com/smirnovkirilll" },
+]
+description = "Lightweight library for primary processing of document photographs for ease of subsequent recognition"
+readme = "README.md"
+requires-python = ">=3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/smirnovkirilll/document_preprocessor"
+Issues = "https://github.com/smirnovkirilll/document_preprocessor/issues"
