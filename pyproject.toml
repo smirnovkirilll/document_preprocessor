@@ -36,9 +36,6 @@ Issues = "https://github.com/smirnovkirilll/document_preprocessor/issues"
 [project.scripts]
 document_preprocessor = "document_preprocessor.cli:run_from_cli"
 
-[tool.hatch.build.targets.wheel]
-packages = [{ include = "document_preprocessor", from = "src" }]
-
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
