@@ -1,27 +1,62 @@
 [build-system]
-requires = [
-    "numpy",
-    "Pillow",
-    "opencv-python",
-]
+requires = ["hatchling>=1.28.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "document_preprocessor"
-version = "2025.12.24"
+dynamic = ["version"]
 authors = [
-  { name="Kirill Smirnov", gighub="https://github.com/smirnovkirilll" },
+    { name="Kirill Smirnov", github="https://github.com/smirnovkirilll" },
 ]
 description = "Lightweight library for primary processing of document photographs for ease of subsequent recognition"
 readme = "README.md"
 requires-python = ">=3.13"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Text Processing :: Linguistic",
 ]
+keywords = ["ocr", "image-processing", "document-scanner", "opencv", "pillow"]
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 
+dependencies = [
+    "Pillow>=12.0.0",
+    "opencv-python>=4.12.0.88",
+    "numpy>=2.2.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/smirnovkirilll/document_preprocessor"
+Source = "https://github.com/smirnovkirilll/document_preprocessor"
 Issues = "https://github.com/smirnovkirilll/document_preprocessor/issues"
+
+[project.scripts]
+document_preprocessor = "document_preprocessor.cli:run_from_cli"
+
+[tool.hatch.build.targets.wheel]
+packages = [{ include = "document_preprocessor", from = "src" }]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/pyproject.toml",
+]
+
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest"
+
+[tool.hatch.version]
+path = "src/document_preprocessor/__init__.py"
