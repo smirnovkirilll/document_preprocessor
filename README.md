@@ -238,11 +238,18 @@ Invalid values are ignored with a warning.
 
 
 ### Installation
+
+**from PyPi**
+```bash
+pip install document_preprocessor
+```
+
+**from GitHub**
 ```bash
 pip install git+https://github.com/smirnovkirilll/document_preprocessor.git
 ```
 
-Required packages (will be installed automatically if not present):
+**Required packages** (will be installed automatically if not present):
 ```bash
 pip install pillow opencv-python numpy
 ```

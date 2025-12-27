@@ -1,4 +1,4 @@
-__version__ = "2025.12.26.2"
+__version__ = "2025.12.27"
 
 from .core import PreprocessorConfig, DocumentPreprocessor, DocumentProcessingError
 
