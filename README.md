@@ -1,3 +1,6 @@
+[![codecov](https://codecov.io/github/smirnovkirilll/document_preprocessor/graph/badge.svg)](https://codecov.io/github/smirnovkirilll/document_preprocessor)
+
+
 > [!CAUTION]
 > AI-created/vibe coded
 >
