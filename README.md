@@ -1,10 +1,14 @@
+[![CI](https://github.com/smirnovkirilll/document_preprocessor/actions/workflows/python-publish.yml/badge.svg)](https://github.com/smirnovkirilll/document_preprocessor/actions/workflows/python-publish.yml)
 [![codecov](https://codecov.io/github/smirnovkirilll/document_preprocessor/graph/badge.svg)](https://codecov.io/github/smirnovkirilll/document_preprocessor)
+[![PyPI version](https://img.shields.io/pypi/v/document_preprocessor.svg)](https://pypi.org/project/document_preprocessor/)
+[![License](https://img.shields.io/github/license/smirnovkirilll/document_preprocessor)](./LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/smirnovkirilll/document_preprocessor?style=social)](https://github.com/smirnovkirilll/document_preprocessor/stargazers)
 
 
 > [!CAUTION]
 > AI-created/vibe coded
 >
-> AI-model: ChatGPT 5.1
+> AI-model: ChatGPT 5.1 / Sonnet 4.5
 >
 > AI-participation degree: 100%
 
