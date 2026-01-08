@@ -95,7 +95,7 @@ def test_profile_selection(monkeypatch, tmp_path, mock_preprocessor):
     output_file = tmp_path / "output.png"
     input_file.touch()
 
-    for profile in ["default", "dark", "shadows", "small_text"]:
+    for profile in ["default", "dark", "shadows", "small_text", "small_text_hard", "cardiogram", "ultrasound"]:
         test_args = [
             "document_preprocessor",
             "--input-file", str(input_file),

@@ -75,9 +75,9 @@ def run_from_cli() -> None:
     # Профиль / базовый рецепт
     parser.add_argument(
         "--profile",
-        choices=["default", "dark", "shadows", "small_text"],
+        choices=["default", "dark", "shadows", "small_text", "small_text_hard", "cardiogram", "ultrasound"],
         default=None,  # профиль может прийти из окружения DOC_PREPROC_PROFILE
-        help="готовый набор настроек (default, dark, shadows, small_text)",
+        help="готовый набор настроек (default, dark, shadows, small_text, small_text_hard, cardiogram, ultrasound)",
     )
 
     # Базовые настройки геометрии и бинаризации

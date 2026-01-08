@@ -199,6 +199,58 @@ class PreprocessorConfig:
             cfg.morph_open_ksize = None
             cfg.morph_close_ksize = 2
 
+        elif profile == "cardiogram":
+            # Кардиограммы — очень тонкие линии графиков, сетка фона:
+            #   - высокое разрешение для сохранения деталей тонких линий,
+            #   - минимальное размытие (тонкие линии легко потерять),
+            #   - умеренный контраст,
+            #   - адаптивная бинаризация (может быть неравномерный фон),
+            #   - НЕТ морфологии opening (съест тонкие линии),
+            #   - очень легкое closing или вообще без него,
+            #   - аккуратный шарпинг для подчеркивания линий.
+            cfg.target_long_side_px = 4500              # высокое разрешение для тонких линий
+            cfg.contrast_factor = 1.5                   # умеренное усиление контраста
+            cfg.median_filter_size = 0                  # отключаем медианный фильтр (не размывать линии)
+
+            # Шарпинг: помогает подчеркнуть тонкие линии графика
+            cfg.sharpen_radius = 1.0
+            cfg.sharpen_percent = 180
+            cfg.sharpen_threshold = 0
+
+            # Адаптивная бинаризация для работы с неравномерным фоном
+            cfg.binarization_method = "adaptive"
+            cfg.adaptive_block_size = 35
+            cfg.adaptive_C = 10
+
+            # Морфология: НЕТ opening (удалит тонкие линии), минимальное closing
+            cfg.morph_open_ksize = None
+            cfg.morph_close_ksize = None                # даже closing отключаем для сохранения тонких линий
+
+        elif profile == "ultrasound":
+            # Ультразвуковые медицинские изображения (УЗИ):
+            #   - изображения в оттенках серого с низким контрастом,
+            #   - характерный спекл-шум (speckle noise),
+            #   - тёмные фоновые области,
+            #   - необходимо сохранить мелкие анатомические детали,
+            #   - часто присутствует текст с данными пациента и измерениями.
+            cfg.target_long_side_px = 4500              # высокое разрешение для деталей
+            cfg.contrast_factor = 1.7                   # усиленный контраст для проявления структур
+            cfg.median_filter_size = 3                  # умеренное подавление спекл-шума
+
+            # Шарпинг: помогает подчеркнуть границы анатомических структур
+            cfg.sharpen_radius = 1.2
+            cfg.sharpen_percent = 160
+            cfg.sharpen_threshold = 0
+
+            # Адаптивная бинаризация для работы с неравномерным контрастом
+            cfg.binarization_method = "adaptive"
+            cfg.adaptive_block_size = 41                # среднее окно для локальной адаптации
+            cfg.adaptive_C = 8
+
+            # Морфология: лёгкое opening для удаления спекл-шума, лёгкое closing для структур
+            cfg.morph_open_ksize = 2
+            cfg.morph_close_ksize = 3
+
         else:
             logger.warning(f"Неизвестный профиль '{profile}', используется 'default'.")
 
