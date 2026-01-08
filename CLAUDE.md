@@ -69,7 +69,7 @@ document_preprocessor --input-file input.jpg --output-file output.png
 - Image enhancement (contrast, noise filtering, sharpening)
 - Binarization settings (Otsu vs adaptive)
 - Morphological post-processing
-- Supports profiles (`default`, `dark`, `shadows`, `small_text`, `small_text_hard`)
+- Supports profiles (`default`, `dark`, `shadows`, `small_text`, `small_text_hard`, `cardiogram`, `ultrasound`)
 - Three-layer configuration: profile defaults → environment variables (`DOC_PREPROC_*`) → CLI args
 
 **`DocumentPreprocessor`** - Main processing class with step-by-step methods:

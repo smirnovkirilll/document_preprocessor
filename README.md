@@ -185,7 +185,37 @@ For very small text, strong shadows, and low‑resolution source images (e.g. di
 Use this when:
 - text is barely legible on the original image,
 - there are pronounced shadows or uneven lighting,
-- upscaling the image doesn’t really add detail (original is already low‑res).
+- upscaling the image doesn't really add detail (original is already low‑res).
+
+### `cardiogram`
+
+For cardiogram/ECG scans with very fine graph lines and grid backgrounds:
+- very high target resolution (4500 px) to preserve thin lines;
+- **no** median filtering to avoid blurring thin lines;
+- moderate contrast enhancement;
+- adaptive binarization to handle uneven paper/background;
+- **no** morphological operations (opening or closing would destroy thin lines);
+- moderate sharpening to enhance fine graph lines.
+
+Use this when:
+- processing medical cardiograms or similar documents with thin graph lines,
+- need to preserve 1-2 pixel wide lines,
+- grid patterns or fine detail must remain intact.
+
+### `ultrasound`
+
+For medical ultrasound/sonography scans with low contrast and speckle noise:
+- high resolution (4500 px) to preserve anatomical details;
+- strong contrast enhancement (1.7x) to bring out subtle tissue structures;
+- moderate median filtering to reduce characteristic speckle noise;
+- adaptive binarization to handle dark backgrounds and uneven contrast;
+- light morphological operations (opening to remove noise, closing to solidify structures);
+- moderate sharpening to enhance tissue boundaries.
+
+Use this when:
+- processing ultrasound/sonography medical images,
+- images have low contrast and grainy/speckle texture,
+- need to preserve text overlays with patient data and measurements.
 
 
 You can still override any parameter in a profile via environment variables or CLI.
