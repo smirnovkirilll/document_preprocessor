@@ -61,6 +61,47 @@ class PreprocessorConfig:
     # Если значение низкое, это, вероятно, не лист, а что-то кривое.
     min_rectangularity: float = 0.7
 
+    # --- Новые параметры для улучшенного обнаружения ---
+
+    # Использовать улучшенный алгоритм обнаружения (многоуровневый с фоллбэками)
+    use_enhanced_detection: bool = True
+
+    # Размер ядра для морфологического закрытия границ (соединяет разрывы)
+    edge_dilation_ksize: int = 3
+
+    # Максимальное количество проверяемых контуров (вместо 10)
+    max_contours_to_check: int = 30
+
+    # Минимальный балл для принятия контура (от 0.0 до 1.0)
+    min_contour_score: float = 0.5
+
+    # Использовать Hough lines как фоллбэк если контуры не найдены
+    use_hough_fallback: bool = True
+
+    # Применять уточнение углов (corner refinement)
+    refine_corners: bool = True
+
+    # Отступ внутрь от найденных границ (в пикселях, 0 = без отступа)
+    crop_margin_px: int = 0
+
+    # --- Параметры для deskew-first подхода ---
+
+    # Использовать deskew-first подход (сначала выравнивание, потом обнаружение)
+    use_deskew_first: bool = True
+
+    # Обнаруживать складки на документе (folded documents)
+    detect_folds: bool = True
+
+    # Для документов со складками: использовать простую обрезку по границам
+    # вместо perspective transform (избегает искажений на складках)
+    simple_crop_if_folded: bool = True
+
+    # Минимальная длина линии Hough для определения угла перекоса
+    deskew_min_line_length_ratio: float = 0.15  # от размера изображения
+
+    # Угол перекоса считается значимым если больше этого порога (градусы)
+    deskew_angle_threshold: float = 0.5
+
     # ---------- Контраст / шум / резкость ----------
 
     # Коэффициент контраста:
@@ -350,11 +391,859 @@ class DocumentPreprocessor:
         self._debug_save_pil(debug_dir, "00_input_exif_fixed.jpg", img)
         return img
 
+    # ---------- Вспомогательные методы для улучшенного обнаружения ----------
+
+    def _enhanced_edge_detection(
+        self,
+        img_gray: np.ndarray,
+        debug_dir: Optional[Path] = None,
+    ) -> np.ndarray:
+        """
+        Улучшенное обнаружение границ с адаптивной бинаризацией и морфологией.
+        """
+        cfg = self.config
+
+        # Bilateral filter для сохранения границ при удалении шума
+        denoised = cv2.bilateralFilter(img_gray, 9, 75, 75)
+
+        # Адаптивная бинаризация для лучшего разделения документа и фона
+        adaptive_thresh = cv2.adaptiveThreshold(
+            denoised,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11,
+            2
+        )
+        self._debug_save_cv2(debug_dir, "02a_adaptive_thresh.png", adaptive_thresh)
+
+        # Пробуем несколько комбинаций Canny для лучшего обнаружения
+        edges1 = cv2.Canny(denoised, cfg.canny_threshold1, cfg.canny_threshold2)
+        edges2 = cv2.Canny(denoised, cfg.canny_threshold1 // 2, cfg.canny_threshold2 // 2)
+        edges3 = cv2.Canny(adaptive_thresh, 50, 150)
+
+        # Объединяем результаты
+        edges_combined = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+        self._debug_save_cv2(debug_dir, "02b_edges_combined.png", edges_combined)
+
+        # Морфологическое закрытие для соединения разрывов в границах
+        if cfg.edge_dilation_ksize > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (cfg.edge_dilation_ksize, cfg.edge_dilation_ksize)
+            )
+            edges_closed = cv2.morphologyEx(edges_combined, cv2.MORPH_CLOSE, kernel)
+            edges_dilated = cv2.dilate(edges_closed, kernel, iterations=1)
+            self._debug_save_cv2(debug_dir, "02c_edges_enhanced.png", edges_dilated)
+            return edges_dilated
+
+        return edges_combined
+
+    def _score_contour(
+        self,
+        approx: np.ndarray,
+        img_gray: np.ndarray,
+        img_area: float,
+    ) -> float:
+        """
+        Оценить качество контура как кандидата на границу документа.
+        Возвращает балл от 0.0 до 1.0.
+        """
+        cfg = self.config
+
+        # 1. Площадь (вес 0.3)
+        area = cv2.contourArea(approx)
+        if area <= 0:
+            return 0.0
+
+        area_ratio = area / img_area
+        if area_ratio < cfg.min_page_area_ratio:
+            return 0.0
+
+        area_score = min(area_ratio / 0.8, 1.0)  # 80% площади = идеально
+
+        # 2. Прямоугольность (вес 0.3)
+        x, y, w, h = cv2.boundingRect(approx)
+        rect_area = w * h if w > 0 and h > 0 else 1
+        rectangularity = float(area) / rect_area
+
+        if rectangularity < cfg.min_rectangularity:
+            return 0.0
+
+        rectangularity_score = rectangularity
+
+        # 3. Соотношение сторон близко к бумаге A4/Letter (вес 0.2)
+        # A4: 1.414, Letter: 1.294, допускаем 1.2-1.6
+        aspect_ratio = max(w, h) / max(min(w, h), 1)
+        aspect_score = 0.0
+        if 1.2 <= aspect_ratio <= 1.6:
+            aspect_score = 1.0
+        elif 1.0 <= aspect_ratio <= 2.0:
+            aspect_score = 0.5
+
+        # 4. Сила границ вдоль контура (вес 0.2)
+        # Проверяем, насколько ярко выражены границы вдоль найденного контура
+        mask = np.zeros(img_gray.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [approx], -1, 255, 2)
+
+        edges_along_contour = cv2.Canny(img_gray, 50, 150)
+        edge_strength = np.sum(cv2.bitwise_and(edges_along_contour, mask)) / (np.sum(mask) + 1)
+        edge_score = min(edge_strength / 50.0, 1.0)
+
+        # Взвешенная сумма
+        total_score = (
+            0.3 * area_score +
+            0.3 * rectangularity_score +
+            0.2 * aspect_score +
+            0.2 * edge_score
+        )
+
+        return total_score
+
+    def _find_best_contour(
+        self,
+        edges: np.ndarray,
+        img_gray: np.ndarray,
+        img_area: float,
+        debug_dir: Optional[Path] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Найти лучший контур документа с оценкой кандидатов.
+        """
+        cfg = self.config
+
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:cfg.max_contours_to_check]
+
+        best_contour = None
+        best_score = cfg.min_contour_score
+
+        for cnt in contours:
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, cfg.contour_epsilon_coef * peri, True)
+
+            # Принимаем 4+ точки, потом сократим до 4
+            if len(approx) < 4:
+                continue
+
+            # Если больше 4 точек, упрощаем сильнее
+            if len(approx) > 4:
+                approx = cv2.approxPolyDP(cnt, cfg.contour_epsilon_coef * peri * 1.5, True)
+
+            if len(approx) != 4:
+                continue
+
+            score = self._score_contour(approx, img_gray, img_area)
+
+            if score > best_score:
+                best_score = score
+                best_contour = approx
+                logger.debug(f"Найден контур с баллом {score:.3f}")
+
+        if best_contour is not None:
+            logger.debug(f"Лучший контур: балл={best_score:.3f}")
+
+        return best_contour
+
+    def _detect_document_by_hough(
+        self,
+        edges: np.ndarray,
+        img_shape: Tuple[int, int],
+        debug_dir: Optional[Path] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Фоллбэк: обнаружение документа через Hough lines.
+        Находим доминирующие прямые линии и их пересечения.
+        """
+        h, w = img_shape[:2]
+        img_area = w * h
+
+        # Hough transform для поиска линий
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=100,
+            minLineLength=min(w, h) // 4,
+            maxLineGap=20
+        )
+
+        if lines is None or len(lines) < 4:
+            logger.debug("Hough lines: недостаточно линий")
+            return None
+
+        # Группируем линии по углу (горизонтальные и вертикальные)
+        horizontal_lines = []
+        vertical_lines = []
+
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+
+            if angle < 30 or angle > 150:  # Горизонтальные
+                horizontal_lines.append((x1, y1, x2, y2))
+            elif 60 < angle < 120:  # Вертикальные
+                vertical_lines.append((x1, y1, x2, y2))
+
+        # Нужно минимум 2 горизонтальных и 2 вертикальных
+        if len(horizontal_lines) < 2 or len(vertical_lines) < 2:
+            logger.debug(f"Hough lines: недостаточно линий (h={len(horizontal_lines)}, v={len(vertical_lines)})")
+            return None
+
+        # Визуализация для отладки
+        if self.debug and debug_dir:
+            lines_vis = np.zeros((h, w, 3), dtype=np.uint8)
+            for x1, y1, x2, y2 in horizontal_lines:
+                cv2.line(lines_vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            for x1, y1, x2, y2 in vertical_lines:
+                cv2.line(lines_vis, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            self._debug_save_cv2(debug_dir, "03b_hough_lines.png", lines_vis)
+
+        # Простая эвристика: берем крайние линии
+        # Сортируем горизонтальные по Y, вертикальные по X
+        horizontal_lines.sort(key=lambda l: (l[1] + l[3]) / 2)
+        vertical_lines.sort(key=lambda l: (l[0] + l[2]) / 2)
+
+        top_line = horizontal_lines[0]
+        bottom_line = horizontal_lines[-1]
+        left_line = vertical_lines[0]
+        right_line = vertical_lines[-1]
+
+        # Находим углы как пересечения линий
+        def line_intersection(line1, line2):
+            x1, y1, x2, y2 = line1
+            x3, y3, x4, y4 = line2
+
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            if abs(denom) < 1e-6:
+                return None
+
+            px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+            py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+
+            return (int(px), int(py))
+
+        tl = line_intersection(top_line, left_line)
+        tr = line_intersection(top_line, right_line)
+        br = line_intersection(bottom_line, right_line)
+        bl = line_intersection(bottom_line, left_line)
+
+        if None in [tl, tr, br, bl]:
+            logger.debug("Hough lines: не удалось найти все пересечения")
+            return None
+
+        # Проверяем, что углы формируют разумный четырехугольник
+        corners = np.array([tl, tr, br, bl], dtype=np.float32).reshape(4, 2)
+        area = cv2.contourArea(corners)
+        area_ratio = area / img_area
+
+        if area_ratio < self.config.min_page_area_ratio:
+            logger.debug(f"Hough lines: слишком маленькая площадь ({area_ratio:.2f})")
+            return None
+
+        logger.debug(f"Hough lines: найден документ с площадью {area_ratio:.2f}")
+        return corners.reshape(4, 1, 2).astype(np.int32)
+
+    def _refine_corners(
+        self,
+        corners: np.ndarray,
+        img_gray: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Уточнить положение углов используя cornerSubPix.
+        """
+        if not self.config.refine_corners:
+            return corners
+
+        corners_float = corners.reshape(4, 2).astype(np.float32)
+
+        # Критерии для cornerSubPix
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        winSize = (5, 5)
+        zeroZone = (-1, -1)
+
+        try:
+            refined = cv2.cornerSubPix(img_gray, corners_float, winSize, zeroZone, criteria)
+            logger.debug("Углы уточнены с помощью cornerSubPix")
+            return refined
+        except Exception as e:
+            logger.debug(f"Не удалось уточнить углы: {e}")
+            return corners_float
+
+    def _apply_crop_margin(
+        self,
+        corners: np.ndarray,
+        margin_px: int,
+    ) -> np.ndarray:
+        """
+        Применить отступ внутрь от границ (чтобы избежать артефактов по краям).
+        """
+        if margin_px <= 0:
+            return corners
+
+        # Находим центр четырехугольника
+        center = np.mean(corners, axis=0)
+
+        # Сдвигаем каждый угол к центру на margin_px пикселей
+        corners_adjusted = corners.copy()
+        for i in range(4):
+            vec = center - corners[i]
+            vec_len = np.linalg.norm(vec)
+            if vec_len > 0:
+                vec_normalized = vec / vec_len
+                corners_adjusted[i] = corners[i] + vec_normalized * margin_px
+
+        return corners_adjusted
+
+    # ---------- Методы для deskew-first подхода ----------
+
+    def _detect_skew_angle(
+        self,
+        img_gray: np.ndarray,
+        debug_dir: Optional[Path] = None,
+    ) -> float:
+        """
+        Определить угол перекоса документа используя Hough lines.
+        Возвращает угол в градусах (положительный = против часовой стрелки).
+        """
+        cfg = self.config
+        h, w = img_gray.shape[:2]
+
+        # Обнаружение границ
+        edges = cv2.Canny(img_gray, 50, 150, apertureSize=3)
+
+        # Hough lines
+        min_line_length = int(min(w, h) * cfg.deskew_min_line_length_ratio)
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=80,
+            minLineLength=min_line_length,
+            maxLineGap=10
+        )
+
+        if lines is None or len(lines) == 0:
+            logger.debug("Deskew: линии не найдены")
+            return 0.0
+
+        # Вычисляем углы всех линий
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+
+            # Нормализуем к диапазону [-45, 45] (предполагаем небольшой перекос)
+            if angle < -45:
+                angle += 90
+            elif angle > 45:
+                angle -= 90
+
+            angles.append(angle)
+
+        if not angles:
+            return 0.0
+
+        # Используем медиану для устойчивости к выбросам
+        median_angle = np.median(angles)
+
+        logger.debug(f"Deskew: обнаружен угол перекоса {median_angle:.2f}°")
+
+        # Визуализация для отладки
+        if self.debug and debug_dir:
+            lines_vis = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+            if lines is not None:
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    cv2.line(lines_vis, (x1, y1), (x2, y2), (0, 255, 0), 1)
+            self._debug_save_cv2(debug_dir, "01a_deskew_lines.png", lines_vis)
+
+        return median_angle
+
+    def _rotate_image(
+        self,
+        img: np.ndarray,
+        angle: float,
+        debug_dir: Optional[Path] = None,
+    ) -> np.ndarray:
+        """
+        Повернуть изображение на заданный угол.
+        """
+        if abs(angle) < self.config.deskew_angle_threshold:
+            logger.debug(f"Deskew: угол {angle:.2f}° слишком мал, пропускаем поворот")
+            return img
+
+        h, w = img.shape[:2]
+        center = (w // 2, h // 2)
+
+        # Матрица поворота
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # Вычисляем новый размер чтобы вместить повернутое изображение
+        cos = np.abs(M[0, 0])
+        sin = np.abs(M[0, 1])
+        new_w = int(h * sin + w * cos)
+        new_h = int(h * cos + w * sin)
+
+        # Корректируем матрицу для нового размера
+        M[0, 2] += (new_w - w) / 2
+        M[1, 2] += (new_h - h) / 2
+
+        # Поворачиваем с белым фоном
+        rotated = cv2.warpAffine(img, M, (new_w, new_h),
+                                  borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=(255, 255, 255))
+
+        logger.debug(f"Deskew: повернуто на {angle:.2f}°")
+        return rotated
+
+    def _detect_fold_lines(
+        self,
+        img_gray: np.ndarray,
+        debug_dir: Optional[Path] = None,
+    ) -> list:
+        """
+        Обнаружить линии складок на документе.
+        Возвращает список складок как [(x1,y1,x2,y2), ...].
+        """
+        h, w = img_gray.shape[:2]
+
+        # Усиленное обнаружение границ для поиска складок
+        blurred = cv2.GaussianBlur(img_gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 90)
+
+        # Морфология для выделения вертикальных/горизонтальных структур
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
+
+        edges_h = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_h)
+        edges_v = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_v)
+        edges_combined = cv2.bitwise_or(edges_h, edges_v)
+
+        # Hough lines для поиска длинных прямых линий (потенциальные складки)
+        lines = cv2.HoughLinesP(
+            edges_combined,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=100,
+            minLineLength=min(w, h) // 3,  # Минимум треть размера
+            maxLineGap=50
+        )
+
+        if lines is None:
+            return []
+
+        # Фильтруем линии: оставляем только почти вертикальные или горизонтальные
+        fold_lines = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+
+            # Вычисляем угол
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+
+            # Горизонтальные (около 0° или 180°) или вертикальные (около 90°)
+            is_horizontal = angle < 15 or angle > 165
+            is_vertical = 75 < angle < 105
+
+            # Проверяем что линия проходит через значительную часть изображения
+            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            min_length = min(w, h) * 0.4
+
+            if (is_horizontal or is_vertical) and length > min_length:
+                # Проверяем что линия проходит ближе к центру (не по краям)
+                if is_vertical:
+                    x_pos = (x1 + x2) / 2
+                    if 0.3 * w < x_pos < 0.7 * w:
+                        fold_lines.append((x1, y1, x2, y2))
+                elif is_horizontal:
+                    y_pos = (y1 + y2) / 2
+                    if 0.3 * h < y_pos < 0.7 * h:
+                        fold_lines.append((x1, y1, x2, y2))
+
+        if fold_lines:
+            logger.debug(f"Обнаружено складок: {len(fold_lines)}")
+
+        # Визуализация
+        if self.debug and debug_dir and fold_lines:
+            fold_vis = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+            for x1, y1, x2, y2 in fold_lines:
+                cv2.line(fold_vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            self._debug_save_cv2(debug_dir, "01b_fold_lines.png", fold_vis)
+
+        return fold_lines
+
+    def _find_document_boundary(
+        self,
+        img_gray: np.ndarray,
+        has_folds: bool,
+        debug_dir: Optional[Path] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Найти внешнюю границу документа, учитывая возможные складки.
+        Возвращает 4 угловых точки или None.
+        """
+        h, w = img_gray.shape[:2]
+        img_area = w * h
+
+        # Адаптивная бинаризация для отделения документа от фона
+        binary = cv2.adaptiveThreshold(
+            img_gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            21,
+            10
+        )
+
+        # Инвертируем если фон светлый
+        if np.mean(binary) > 127:
+            binary = cv2.bitwise_not(binary)
+
+        self._debug_save_cv2(debug_dir, "01c_binary.png", binary)
+
+        # Морфология для закрытия дыр и соединения разрывов
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        # Заполнение дыр
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            logger.debug("Boundary: контуры не найдены")
+            return None
+
+        # Находим самый большой контур (предполагаем это документ)
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        area_ratio = area / img_area
+
+        logger.debug(f"Boundary: largest contour area ratio = {area_ratio:.3f}")
+
+        if area_ratio < 0.1:
+            logger.debug("Boundary: контур слишком маленький")
+            return None
+
+        # Визуализация
+        if self.debug and debug_dir:
+            contour_vis = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+            cv2.drawContours(contour_vis, [largest_contour], -1, (0, 255, 0), 3)
+            self._debug_save_cv2(debug_dir, "01d_largest_contour.png", contour_vis)
+
+        # Если есть складки, используем выпуклую оболочку для внешней границы
+        if has_folds:
+            hull = cv2.convexHull(largest_contour)
+            largest_contour = hull
+            logger.debug("Boundary: используется convex hull из-за складок")
+
+        # Аппроксимируем контур до 4 точек
+        peri = cv2.arcLength(largest_contour, True)
+
+        # Пробуем разные epsilon для получения 4 точек
+        for epsilon_coef in [0.01, 0.02, 0.03, 0.04, 0.05]:
+            approx = cv2.approxPolyDP(largest_contour, epsilon_coef * peri, True)
+            if len(approx) == 4:
+                logger.debug(f"Boundary: найдено 4 точки с epsilon={epsilon_coef}")
+                return approx
+
+        # Если не удалось получить 4 точки, используем bounding rectangle
+        logger.debug("Boundary: не удалось аппроксимировать до 4 точек, используем bounding rect")
+        rect = cv2.minAreaRect(largest_contour)
+        box = cv2.boxPoints(rect)
+        return box.astype(np.int32).reshape(4, 1, 2)
+
+    def _simple_crop_by_boundary(
+        self,
+        img: np.ndarray,
+        corners: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Простая обрезка по границам без perspective transform.
+        Используется для документов со складками.
+        """
+        # Находим bounding rectangle
+        x, y, w, h = cv2.boundingRect(corners)
+
+        # Добавляем небольшие отступы если есть место
+        margin = 10
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(img.shape[1] - x, w + 2 * margin)
+        h = min(img.shape[0] - y, h + 2 * margin)
+
+        cropped = img[y:y+h, x:x+w]
+        logger.debug(f"Simple crop: {w}x{h}")
+        return cropped
+
     def detect_and_warp_document(
         self,
         pil_img: Image.Image,
         debug_dir: Optional[Path] = None,
     ) -> Image.Image:
+        """
+        Улучшенное обнаружение и выпрямление документа с многоуровневым подходом.
+
+        Стратегия (в зависимости от настроек):
+
+        Deskew-first подход (use_deskew_first=True, рекомендуется):
+        1. Deskew - выравнивание документа по доминирующему углу
+        2. Fold detection - обнаружение складок
+        3. Boundary detection - поиск внешней границы (с учетом складок)
+        4. Adaptive cropping - perspective transform или simple crop в зависимости от складок
+
+        Enhanced подход (use_enhanced_detection=True):
+        1. Enhanced edge detection (адаптивная бинаризация + морфология)
+        2. Contour selection with scoring (оценка по множеству критериев)
+        3. Hough lines fallback (если контуры не найдены)
+        4. Corner refinement (уточнение углов)
+        5. Optional margin (отступ от краёв)
+
+        Simple подход (legacy):
+        Базовое обнаружение контуров без улучшений
+        """
+        cfg = self.config
+
+        # === DESKEW-FIRST APPROACH ===
+        if cfg.use_deskew_first:
+            return self._detect_and_warp_deskew_first(pil_img, debug_dir)
+
+        # === ENHANCED APPROACH ===
+        if cfg.use_enhanced_detection:
+            return self._detect_and_warp_enhanced(pil_img, debug_dir)
+
+        # === SIMPLE APPROACH (legacy) ===
+        return self._detect_and_warp_simple(pil_img, debug_dir)
+
+    def _detect_and_warp_deskew_first(
+        self,
+        pil_img: Image.Image,
+        debug_dir: Optional[Path] = None,
+    ) -> Image.Image:
+        """
+        Deskew-first подход: сначала выравнивание, потом обнаружение границ.
+        Хорошо работает с документами со складками.
+        """
+        cfg = self.config
+
+        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        orig_h, orig_w = img_cv.shape[:2]
+
+        logger.debug(f"detect_and_warp (deskew-first): input size {orig_w}x{orig_h}")
+        self._debug_save_cv2(debug_dir, "00_input.jpg", img_cv)
+
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+        # STAGE 1: Detect and correct skew
+        skew_angle = self._detect_skew_angle(gray, debug_dir)
+        img_deskewed = self._rotate_image(img_cv, skew_angle, debug_dir)
+        gray_deskewed = cv2.cvtColor(img_deskewed, cv2.COLOR_BGR2GRAY)
+
+        self._debug_save_cv2(debug_dir, "01_deskewed.jpg", img_deskewed)
+
+        # STAGE 2: Detect folds
+        fold_lines = []
+        if cfg.detect_folds:
+            fold_lines = self._detect_fold_lines(gray_deskewed, debug_dir)
+
+        has_folds = len(fold_lines) > 0
+        if has_folds:
+            logger.info(f"Обнаружен документ со складками ({len(fold_lines)} складок)")
+
+        # STAGE 3: Find document boundary
+        boundary = self._find_document_boundary(gray_deskewed, has_folds, debug_dir)
+
+        if boundary is None:
+            logger.debug("Deskew-first: boundary not found, returning original")
+            return pil_img
+
+        # Визуализация границы
+        if self.debug and debug_dir:
+            boundary_vis = img_deskewed.copy()
+            cv2.drawContours(boundary_vis, [boundary], -1, (0, 255, 0), 5)
+            for pt in boundary.reshape(4, 2):
+                cv2.circle(boundary_vis, tuple(pt.astype(int)), 10, (0, 0, 255), -1)
+            self._debug_save_cv2(debug_dir, "01e_detected_boundary.png", boundary_vis)
+
+        # STAGE 4: Adaptive cropping strategy
+        if has_folds and cfg.simple_crop_if_folded:
+            # Простая обрезка для документов со складками
+            logger.debug("Using simple crop (document has folds)")
+            cropped = self._simple_crop_by_boundary(img_deskewed, boundary)
+        else:
+            # Perspective transform для ровных документов
+            logger.debug("Using perspective transform")
+
+            pts = boundary.reshape(4, 2).astype("float32")
+
+            # Corner refinement
+            if cfg.refine_corners:
+                pts = self._refine_corners(pts, gray_deskewed)
+
+            # Apply margin
+            if cfg.crop_margin_px > 0:
+                pts = self._apply_crop_margin(pts, cfg.crop_margin_px)
+
+            # Order points and calculate target size
+            rect = self.order_points(pts)
+            (tl, tr, br, bl) = rect
+
+            widthA = np.linalg.norm(br - bl)
+            widthB = np.linalg.norm(tr - tl)
+            maxWidth = int(max(widthA, widthB))
+
+            heightA = np.linalg.norm(tr - br)
+            heightB = np.linalg.norm(tl - bl)
+            maxHeight = int(max(heightA, heightB))
+
+            logger.debug(f"Perspective transform target size: {maxWidth}x{maxHeight}")
+
+            dst = np.array(
+                [
+                    [0, 0],
+                    [maxWidth - 1, 0],
+                    [maxWidth - 1, maxHeight - 1],
+                    [0, maxHeight - 1],
+                ],
+                dtype="float32",
+            )
+
+            try:
+                M = cv2.getPerspectiveTransform(rect, dst)
+                cropped = cv2.warpPerspective(img_deskewed, M, (maxWidth, maxHeight))
+            except Exception as e:
+                logger.warning(f"Perspective transform failed: {e}")
+                return pil_img
+
+        self._debug_save_cv2(debug_dir, "02_final_cropped.jpg", cropped)
+
+        # Convert back to PIL
+        cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        pil_result = Image.fromarray(cropped_rgb)
+
+        return pil_result
+
+    def _detect_and_warp_enhanced(
+        self,
+        pil_img: Image.Image,
+        debug_dir: Optional[Path] = None,
+    ) -> Image.Image:
+        """
+        Enhanced подход: улучшенное обнаружение контуров с множественными стратегиями.
+        """
+        cfg = self.config
+
+        # Выбор алгоритма: старый (простой) или новый (улучшенный)
+        if not cfg.use_enhanced_detection:
+            return self._detect_and_warp_simple(pil_img, debug_dir)
+
+        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        orig_h, orig_w = img_cv.shape[:2]
+
+        # Downscale для ускорения обработки
+        long_side = max(orig_w, orig_h)
+        scale = 1.0
+        if long_side > cfg.max_proc_dim:
+            scale = cfg.max_proc_dim / long_side
+            proc_w = int(orig_w * scale)
+            proc_h = int(orig_h * scale)
+            img_small = cv2.resize(img_cv, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
+        else:
+            img_small = img_cv.copy()
+            proc_w, proc_h = orig_w, orig_h
+
+        logger.debug(
+            f"detect_and_warp_document (enhanced): orig=({orig_w}x{orig_h}), "
+            f"proc=({proc_w}x{proc_h}), scale={scale:.3f}"
+        )
+        self._debug_save_cv2(debug_dir, "01_input_resized.jpg", img_small)
+
+        gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
+        img_area = proc_w * proc_h
+
+        # STAGE 1: Enhanced edge detection
+        edges = self._enhanced_edge_detection(gray, debug_dir)
+
+        # STAGE 2: Find best contour with scoring
+        page_contour = self._find_best_contour(edges, gray, img_area, debug_dir)
+
+        # STAGE 3: Hough lines fallback
+        if page_contour is None and cfg.use_hough_fallback:
+            logger.debug("Contour detection failed, trying Hough lines...")
+            page_contour = self._detect_document_by_hough(edges, (proc_h, proc_w), debug_dir)
+
+        # Если ничего не найдено, возвращаем оригинал
+        if page_contour is None:
+            logger.debug("Document detection failed, returning original image.")
+            return pil_img
+
+        # Визуализация найденного контура
+        contours_vis = img_small.copy()
+        cv2.drawContours(contours_vis, [page_contour], -1, (0, 255, 0), 3)
+        for pt in page_contour.reshape(4, 2):
+            cv2.circle(contours_vis, tuple(pt.astype(int)), 5, (0, 0, 255), -1)
+        self._debug_save_cv2(debug_dir, "03_page_contour_detected.png", contours_vis)
+
+        # Масштабируем контур обратно к исходному размеру
+        pts_small = page_contour.reshape(4, 2).astype("float32")
+        pts = pts_small / scale
+
+        # STAGE 4: Corner refinement
+        # Уточняем на исходном изображении (не на уменьшенном)
+        gray_orig = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        pts = self._refine_corners(pts, gray_orig)
+
+        # STAGE 5: Apply crop margin
+        pts = self._apply_crop_margin(pts, cfg.crop_margin_px)
+
+        # Упорядочиваем точки (TL, TR, BR, BL)
+        rect = self.order_points(pts)
+        (tl, tr, br, bl) = rect
+
+        # Вычисляем размер целевого прямоугольника
+        widthA = np.linalg.norm(br - bl)
+        widthB = np.linalg.norm(tr - tl)
+        maxWidth = int(max(widthA, widthB))
+
+        heightA = np.linalg.norm(tr - br)
+        heightB = np.linalg.norm(tl - bl)
+        maxHeight = int(max(heightA, heightB))
+
+        logger.debug(f"Target rect size: {maxWidth}x{maxHeight}")
+
+        # Целевой прямоугольник
+        dst = np.array(
+            [
+                [0, 0],
+                [maxWidth - 1, 0],
+                [maxWidth - 1, maxHeight - 1],
+                [0, maxHeight - 1],
+            ],
+            dtype="float32",
+        )
+
+        # STAGE 6: Warp perspective
+        try:
+            M = cv2.getPerspectiveTransform(rect, dst)
+            warped = cv2.warpPerspective(img_cv, M, (maxWidth, maxHeight))
+        except Exception as e:
+            logger.warning(f"Perspective transform failed: {e}. Returning original image.")
+            return pil_img
+
+        self._debug_save_cv2(debug_dir, "04_warped_color.jpg", warped)
+
+        warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+        pil_warped = Image.fromarray(warped_rgb)
+        self._debug_save_pil(debug_dir, "05_warped_pil_rgb.jpg", pil_warped)
+        return pil_warped
+
+    def _detect_and_warp_simple(
+        self,
+        pil_img: Image.Image,
+        debug_dir: Optional[Path] = None,
+    ) -> Image.Image:
+        """
+        Старый простой алгоритм обнаружения (для обратной совместимости).
+        Используется если use_enhanced_detection=False.
+        """
         cfg = self.config
 
         img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -372,7 +1261,7 @@ class DocumentPreprocessor:
             proc_w, proc_h = orig_w, orig_h
 
         logger.debug(
-            f"detect_and_warp_document: orig=({orig_w}x{orig_h}), "
+            f"detect_and_warp_document (simple): orig=({orig_w}x{orig_h}), "
             f"proc=({proc_w}x{proc_h}), scale={scale:.3f}"
         )
         self._debug_save_cv2(debug_dir, "01_input_resized.jpg", img_small)
@@ -411,12 +1300,12 @@ class DocumentPreprocessor:
 
             page_contour = approx
             logger.debug(
-                f"Найден подходящий контур: area_ratio={area_ratio:.3f}, rectangularity={rectangularity:.3f}"
+                f"Found contour: area_ratio={area_ratio:.3f}, rectangularity={rectangularity:.3f}"
             )
             break
 
         if page_contour is None:
-            logger.debug("Контур страницы не найден или не прошёл фильтры, возвращаем исходное изображение.")
+            logger.debug("No page contour found, returning original image.")
             return pil_img
 
         contours_vis = img_small.copy()
@@ -453,7 +1342,7 @@ class DocumentPreprocessor:
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(img_cv, M, (maxWidth, maxHeight))
         except Exception as e:
-            logger.warning(f"Ошибка при перспективном преобразовании: {e}. Возвращаем исходное изображение.")
+            logger.warning(f"Perspective transform error: {e}. Returning original image.")
             return pil_img
 
         self._debug_save_cv2(debug_dir, "04_warped_color.jpg", warped)

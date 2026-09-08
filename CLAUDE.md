@@ -66,11 +66,30 @@ document_preprocessor --input-file input.jpg --output-file output.png
 
 **`PreprocessorConfig`** - Dataclass holding all preprocessing parameters:
 - Geometry settings (target size, page detection thresholds)
+- **Deskew-first detection settings** (NEW, recommended):
+  - `use_deskew_first` (default: True) - enables deskew-first algorithm
+  - `detect_folds` (default: True) - detect document creases/folds
+  - `simple_crop_if_folded` (default: True) - use simple crop for folded docs
+  - `deskew_min_line_length_ratio` (default: 0.15) - minimum line length for skew detection
+  - `deskew_angle_threshold` (default: 0.5°) - minimum angle to apply rotation
+- **Enhanced detection settings**:
+  - `use_enhanced_detection` (default: True) - enables multi-stage algorithm
+  - `edge_dilation_ksize` (default: 3) - morphological edge enhancement
+  - `max_contours_to_check` (default: 30) - vs 10 in old algorithm
+  - `min_contour_score` (default: 0.5) - minimum quality threshold
+  - `use_hough_fallback` (default: True) - line-based detection fallback
+  - `refine_corners` (default: True) - sub-pixel corner accuracy
+  - `crop_margin_px` (default: 0) - inward margin from detected edges
 - Image enhancement (contrast, noise filtering, sharpening)
 - Binarization settings (Otsu vs adaptive)
 - Morphological post-processing
 - Supports profiles (`default`, `dark`, `shadows`, `small_text`, `small_text_hard`, `cardiogram`, `ultrasound`)
 - Three-layer configuration: profile defaults → environment variables (`DOC_PREPROC_*`) → CLI args
+
+**Algorithm Selection Priority** (first matching condition wins):
+1. If `use_deskew_first=True` → Deskew-First Algorithm (default, best for real-world docs)
+2. Else if `use_enhanced_detection=True` → Enhanced Algorithm
+3. Else → Simple Algorithm (legacy)
 
 **`DocumentPreprocessor`** - Main processing class with step-by-step methods:
 - `load_and_fix_exif()` - Handles EXIF orientation from phone photos
@@ -148,11 +167,72 @@ Tests use `monkeypatch` for environment variable testing. Most tests require tes
 ## Key Implementation Details
 
 ### Page Detection Algorithm
-- Downsamples image to `max_proc_dim` for faster processing
-- Uses Canny edge detection with configurable thresholds
-- Finds 4-point contours via `cv2.findContours()` + `cv2.approxPolyDP()`
-- Filters by area ratio (min 20% of image) and rectangularity (contour area / bounding box area)
-- Falls back to full image if no valid page found
+
+The library now has **3 detection strategies** that can be selected via configuration:
+
+**1. Deskew-First Algorithm** (NEW, default, `use_deskew_first=True`):
+
+Best for: Documents with folds, creases, or significant skew. Recommended for real-world scenarios.
+
+1. **Deskew Stage** - Corrects document rotation before detection:
+   - Detects dominant lines via Hough transform
+   - Calculates median angle from all detected lines
+   - Rotates image to align document with axes
+   - Skips rotation if angle < 0.5° threshold
+
+2. **Fold Detection** - Identifies document creases:
+   - Looks for long straight lines (vertical/horizontal) in center regions
+   - Uses morphological operations to enhance crease visibility
+   - Detects folds that span at least 40% of document dimension
+   - Marks document as "folded" if creases found
+
+3. **Boundary Detection** - Finds outer document edges:
+   - Uses adaptive thresholding to separate document from background
+   - Morphological closing to fill gaps and connect breaks
+   - Finds largest contour (assumes it's the document)
+   - If folded: uses convex hull to encompass entire boundary
+   - Approximates to 4 corner points
+
+4. **Adaptive Cropping** - Strategy depends on fold detection:
+   - **If folded** (and `simple_crop_if_folded=True`): Simple rectangular crop by bounding box (avoids distortion from perspective transform on non-planar surface)
+   - **If not folded**: Full perspective transform with corner refinement
+
+Handles documents that were folded and unfolded (appear as 4 combined rectangles).
+
+**2. Enhanced Multi-Stage Algorithm** (`use_enhanced_detection=True`):
+
+1. **Enhanced Edge Detection** - Combines multiple techniques:
+   - Bilateral filtering to preserve edges while removing noise
+   - Adaptive thresholding for better document/background separation
+   - Multiple Canny threshold combinations merged together
+   - Morphological closing to connect edge gaps
+
+2. **Contour Scoring** - Evaluates candidates by multiple criteria (0.0-1.0 score):
+   - Area coverage (weight 0.3) - prefers 80% of image area
+   - Rectangularity (weight 0.3) - contour area / bounding box area
+   - Aspect ratio (weight 0.2) - favors A4/Letter proportions (1.2-1.6)
+   - Edge strength (weight 0.2) - measures edge intensity along contour
+   - Checks up to 30 contours (vs 10 in old algorithm)
+
+3. **Hough Lines Fallback** - If no good contour found:
+   - Detects dominant straight lines via Hough transform
+   - Groups into horizontal and vertical lines
+   - Finds corner intersections
+   - Validates against paper-like proportions
+
+4. **Corner Refinement** - Uses `cv2.cornerSubPix()` to sub-pixel accuracy
+5. **Optional Margins** - Can apply inward offset via `crop_margin_px`
+
+**3. Simple Algorithm** (legacy):
+
+Enabled by: `use_deskew_first=False` AND `use_enhanced_detection=False`
+
+- Basic Canny edge detection on Gaussian-blurred grayscale
+- Finds 4-point contours, checks top 10 by area
+- Filters by area ratio and rectangularity only
+- No deskewing, no fold detection, no fallback, no corner refinement
+
+**Recommendation:** Use Deskew-First (default) for best results with real-world documents, especially those with folds, creases, or rotation.
 
 ### Binarization Methods
 - **Otsu:** Global threshold via `cv2.threshold(cv2.THRESH_OTSU)` - good for even lighting
