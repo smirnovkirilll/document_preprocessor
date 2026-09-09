@@ -1,11 +1,39 @@
-*coverage*
-*htmlcov*
-.idea
+# ── os and editors ────────────────────────────────────────────
 .DS_Store
-.pytest_cache
-.venv*
-__pycache__
-dist
-README.html
-README.todo
+.idea/
+*.swp
+*~
+
+# ── local markdown previews ───────────────────────────────────
+# README only: a blanket *.html swallows archived web pages
+README*.html
+
+# ── secrets and local configuration ───────────────────────────
 *.env
+.env.*
+*.pem
+*.key
+id_rsa*
+
+# ── python ────────────────────────────────────────────────────
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# ── terraform ─────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate*
+secret*.tfvars
+
+# ── drafts and local scratch that never gets committed ────────
+*_NOGIT
+*.bak
