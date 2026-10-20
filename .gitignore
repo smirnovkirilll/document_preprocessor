@@ -1,11 +1,14 @@
 # ── os and editors ────────────────────────────────────────────
 .DS_Store
 .idea/
+.vscode/
 *.swp
 *~
 
 # ── local markdown previews ───────────────────────────────────
-# README only: a blanket *.html swallows archived web pages
+# a document is rendered to a sibling .html with the same name, and that
+# render is ephemeral. a blanket *.html would swallow archived web pages,
+# so only README here — add narrower rules per repository as needed
 README*.html
 
 # ── secrets and local configuration ───────────────────────────
@@ -14,25 +17,44 @@ README*.html
 *.pem
 *.key
 id_rsa*
+.aws/
+# wrangler: local secrets live in .dev.vars, local state in .wrangler
+.dev.vars
+.dev.vars.*
+.wrangler/
 
 # ── python ────────────────────────────────────────────────────
 .venv*/
+venv*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage*
+.ipynb_checkpoints/
 htmlcov/
 build/
 dist/
 *.egg-info/
 
+# ── node ──────────────────────────────────────────────────────
+node_modules/
+
+# ── quarto ────────────────────────────────────────────────────
+_site/
+.quarto/
+
 # ── terraform ─────────────────────────────────────────────────
 .terraform/
-.terraform.lock.hcl
 *.tfstate*
-secret*.tfvars
+# a plan embeds variable values in clear text, secrets included
+*.tfplan
+# any tfvars may hold keys, so ignore all and whitelist examples
+*.tfvars
+!*.example.tfvars
+# .terraform.lock.hcl is deliberately NOT ignored: it pins provider
+# versions and must be committed for reproducible runs
 
 # ── drafts and local scratch that never gets committed ────────
 *_NOGIT
